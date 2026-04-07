@@ -1,0 +1,186 @@
+name: starport — add repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: 'URLs to add (one per line, duplicates ignored)'
+        required: true
+        default: ''
+      name:
+        description: 'Preferred repository name (optional)'
+        required: false
+        default: ''
+      branch:
+        description: 'Branch to sync/build from (optional)'
+        required: false
+        default: ''
+      build_type:
+        description: 'Build system (flutter, android-gradle, java, kotlin, node)'
+        required: false
+        default: ''
+      targets:
+        description: 'Comma separated targets (apk,ios,exe,appImage)'
+        required: false
+        default: ''
+      runner:
+        description: 'GitHub Action runner (ubuntu-latest, macos-latest, windows-latest)'
+        required: false
+        default: 'ubuntu-latest'
+      sync_after:
+
+        description: 'Sync newly added repos immediately after adding'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  add-repos:
+    name: Add Repos
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "starport@noreply"
+          git config --global user.name "starport"
+          git config --global credential.helper ""
+          git config --global core.askPass ""
+
+      - name: Install PyYAML
+        run: pip install pyyaml -q --break-system-packages
+
+      # ── Add URLs to repos.yml ─────────────────────────────────
+      - name: Add repos to list
+        env:
+          ADD_REPOS:  ${{ github.event.inputs.urls }}
+          NAME:       ${{ github.event.inputs.name }}
+          BRANCH:     ${{ github.event.inputs.branch }}
+          BUILD_TYPE: ${{ github.event.inputs.build_type }}
+          TARGETS:    ${{ github.event.inputs.targets }}
+          RUNNER:     ${{ github.event.inputs.runner }}
+        run: |
+          touch lfs-repos.txt
+          ADDED=0
+          UPDATED=0
+          LFS_BLOCKED=0
+
+          CLEAN_URLS=$(echo "$ADD_REPOS" | python3 scripts/python/split-urls.py)
+
+          while IFS= read -r url; do
+            [ -z "$url" ] && continue
+
+            if grep -qF "$url" lfs-repos.txt 2>/dev/null; then
+              echo "🗂️  LFS excluded: $(basename $url .git)"
+              LFS_BLOCKED=$((LFS_BLOCKED + 1))
+              continue
+            fi
+
+            # add-to-repos now handles add/update logic
+            python3 scripts/python/add-to-repos.py repos.yml "$url" "$NAME" "$BRANCH" "$BUILD_TYPE" "$TARGETS" "$RUNNER"
+            echo "✅ Processed: $(basename $url .git)"
+            ADDED=$((ADDED + 1))
+          done <<< "$CLEAN_URLS"
+
+          echo ""
+          echo "📊 Processed: $ADDED  LFS blocked: $LFS_BLOCKED"
+
+          if [ "$ADDED" -gt 0 ]; then
+            git add repos.yml
+            git commit -m "repos: sync changes for $ADDED repo(s)"
+            git push
+            echo "$CLEAN_URLS" > /tmp/newly-added.txt
+          else
+            echo "" > /tmp/newly-added.txt
+          fi
+
+
+      # ── Fetch previous state ──────────────────────────────────
+      - name: Fetch previous state
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+        run: |
+          STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+          if git clone "$STATE_REMOTE" /tmp/void-state 2>/dev/null; then
+            [ -f /tmp/void-state/state.json ] && \
+              cp /tmp/void-state/state.json /tmp/prev-state.json && \
+              echo "✅ Previous state loaded" || \
+              echo "⚠️  No state.json — first run"
+          else
+            echo "⚠️  Could not clone state repo"
+          fi
+
+      # ── Sync newly added repos ────────────────────────────────
+      - name: Sync newly added repos
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:       /tmp/newly-added.yml
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          FORCE_FULL:       "true"
+          GROUP:            ${{ github.event.inputs.group }}
+        run: |
+          if [ ! -s /tmp/newly-added.txt ]; then
+            echo "⏭️  Nothing new to sync"
+            exit 0
+          fi
+          python3 scripts/python/make-temp-repos.py /tmp/newly-added.txt "$GROUP" /tmp/newly-added.yml
+          chmod +x scripts/sync.sh
+          bash scripts/sync.sh || true
+
+      # ── Commit lfs changes ────────────────────────────────────
+      - name: Commit lfs changes
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        run: |
+          git add repos.yml lfs-repos.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "📋 No LFS changes"
+          else
+            git commit -m "sync: update repo lists after add"
+            git push
+          fi
+
+      # ── Generate README ───────────────────────────────────────
+      - name: Generate README
+        if: ${{ github.event.inputs.sync_after == 'true' }}
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REPOS_FILE:       repos.yml
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          README_ONLY:      "false"
+        run: |
+          git checkout repos.yml 2>/dev/null || true
+          chmod +x scripts/generate-readme.sh
+          bash scripts/generate-readme.sh
+
+      # ── Upload log ───────────────────────────────────────────
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: add-repos-log-${{ github.run_id }}
+          path: |
+            /tmp/sync.log
+            /tmp/sync-verbose.log
+          retention-days: 30
+
+      - name: Print log
+        if: always()
+        run: cat /tmp/sync.log || true

@@ -1,0 +1,211 @@
+name: starport — build
+
+on:
+  workflow_dispatch:
+    inputs:
+      matrix_json:
+        description: 'JSON matrix of repositories to build'
+        required: true
+        default: '[]'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: echo "matrix={\"include\":${{ github.event.inputs.matrix_json }}}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ matrix.source_repo }}
+          ref: ${{ matrix.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # --- Flutter Build ---
+      - name: Setup Flutter
+        if: matrix.build_type == 'flutter'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Flutter Build APK
+        if: matrix.build_type == 'flutter' && contains(matrix.targets, 'apk')
+        run: |
+          flutter pub get
+          flutter build apk --release
+
+      - name: Flutter Build iOS
+        if: matrix.build_type == 'flutter' && contains(matrix.targets, 'ios') && runner.os == 'macOS'
+        run: |
+          flutter pub get
+          flutter build ios --release --no-codesign
+
+      # --- Node / Electron Build ---
+      - name: Setup Node
+        if: matrix.build_type == 'node' || matrix.build_type == 'electron'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'latest'
+
+      - name: Build AppImage (Linux)
+        if: (matrix.build_type == 'node' || matrix.build_type == 'electron') && contains(matrix.targets, 'appImage') && runner.os == 'Linux'
+        run: |
+          npm install
+          npm run build -- --linux AppImage
+
+      # --- Java / Kotlin / Android (Gradle) Build ---
+      - name: Setup Java
+        if: matrix.build_type == 'android-gradle' || matrix.build_type == 'java' || matrix.build_type == 'kotlin'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Gradle
+        if: matrix.build_type == 'android-gradle' || matrix.build_type == 'java' || matrix.build_type == 'kotlin'
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        if: matrix.build_type == 'android-gradle' || (matrix.build_type == 'kotlin' && contains(matrix.targets, 'apk'))
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "build-tools;36.0.0 ndk;27.2.12479018 platforms;android-36"
+
+      - name: Configure Android SDK Path
+        if: matrix.build_type == 'android-gradle' || (matrix.build_type == 'kotlin' && contains(matrix.targets, 'apk'))
+        run: echo "sdk.dir=${ANDROID_HOME}" >> local.properties
+
+      - name: Inject local.properties secret
+        if: (matrix.build_type == 'android-gradle' || matrix.build_type == 'kotlin') && secrets.LOCAL_PROPERTIES != ''
+        env:
+          LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
+        run: echo "$LOCAL_PROPERTIES" >> local.properties
+
+      - name: Tune Gradle JVM memory
+        if: matrix.build_type == 'android-gradle' || matrix.build_type == 'java' || matrix.build_type == 'kotlin'
+        run: |
+          MEMORY_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          MEMORY_GB=$((MEMORY_KB / 1024 / 1024))
+          echo "Detected memory: ${MEMORY_GB}GB"
+          if [ "$MEMORY_GB" -ge 12 ]; then
+            sed -i '/^org\.gradle\.jvmargs=/d' gradle.properties 2>/dev/null || true
+            echo "org.gradle.jvmargs=-Xmx8G -XX:MaxMetaspaceSize=2G -XX:+UseParallelGC -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8" >> gradle.properties
+          fi
+
+      # --- Decode keystore — runs for any build targeting APK ---
+      - name: Setup signing keystore
+        if: contains(matrix.targets, 'apk') && secrets.KEYSTORE_BASE64 != ''
+        env:
+          KEYSTORE_BASE64:    ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_ALIAS:          ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:       ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD:  ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.keystore"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=$KEY_ALIAS"                         >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=$KEY_PASSWORD"                   >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"         >> "$GITHUB_ENV"
+
+      - name: Build with Gradle
+        id: gradle_build
+        if: matrix.build_type == 'android-gradle' || matrix.build_type == 'java' || matrix.build_type == 'kotlin'
+        env:
+          KEYSTORE_PATH:      ${{ env.KEYSTORE_PATH }}
+          KEY_ALIAS:          ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD:       ${{ env.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD:  ${{ env.KEYSTORE_PASSWORD }}
+        run: |
+          export BUILD_TIMESTAMP=$(date +%s)
+          echo "build_timestamp=$BUILD_TIMESTAMP" >> "$GITHUB_OUTPUT"
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assembleRelease \
+              -Pandroid.injected.signing.store.file="${KEYSTORE_PATH}" \
+              -Pandroid.injected.signing.store.password="${KEYSTORE_PASSWORD}" \
+              -Pandroid.injected.signing.key.alias="${KEY_ALIAS}" \
+              -Pandroid.injected.signing.key.password="${KEY_PASSWORD}"
+          else
+            gradle assembleRelease
+          fi
+          # Discover APK output path dynamically
+          APK_PATH=$(find . -path "*/apk/release/*.apk" | head -1 | xargs dirname 2>/dev/null || echo "")
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
+
+      # --- zipalign + apksigner — runs for any build that produced APKs ---
+      - name: Align and sign APK
+        if: contains(matrix.targets, 'apk') && env.KEYSTORE_PATH != ''
+        run: |
+          BUILD_TOOLS=$(ls "${ANDROID_HOME}/build-tools" | sort -V | tail -1)
+          ZIPALIGN="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/zipalign"
+          APKSIGNER="${ANDROID_HOME}/build-tools/${BUILD_TOOLS}/apksigner"
+
+          # Collect APKs from all known output locations
+          mapfile -t APKS < <(find . \
+            -path "*/apk/release/*.apk" \
+            -o -path "*/flutter-apk/*.apk" \
+            | grep -v "\-aligned\|signed" 2>/dev/null)
+
+          for apk in "${APKS[@]}"; do
+            [ -f "$apk" ] || continue
+            aligned="${apk%.apk}-aligned.apk"
+            signed="${apk%.apk}-signed.apk"
+            "$ZIPALIGN" -v -p 4 "$apk" "$aligned"
+            "$APKSIGNER" sign \
+              --ks "$KEYSTORE_PATH" \
+              --ks-pass "pass:${KEYSTORE_PASSWORD}" \
+              --key-pass "pass:${KEY_PASSWORD}" \
+              --ks-key-alias "${KEY_ALIAS}" \
+              --out "$signed" \
+              "$aligned"
+            "$APKSIGNER" verify "$signed"
+            mv "$signed" "$apk"
+            rm -f "$aligned"
+            echo "✅ Signed: $(basename $apk)"
+          done
+
+
+      # --- Artifact Upload ---
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.name }}-artifacts
+          path: |
+            ${{ env.APK_PATH }}
+            build/app/outputs/flutter-apk/*.apk
+            build/ios/iphoneos/*.app
+            build/libs/*.jar
+            dist/*.AppImage
+            dist/*.exe
+
+      # --- GitHub Release in Mirror Repo ---
+      - name: Release Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.repository_owner }}/${{ matrix.name }}
+          tag_name: "build-${{ steps.gradle_build.outputs.build_timestamp || github.run_number }}"
+          name: "Build ${{ steps.gradle_build.outputs.build_timestamp || github.run_number }}"
+          token: ${{ secrets.REMOTE_TOKEN }}
+          files: |
+            ${{ env.APK_PATH }}/*.apk
+            build/app/outputs/flutter-apk/*.apk
+            build/ios/iphoneos/*.app
+            build/libs/*.jar
+            dist/*.AppImage
+            dist/*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+

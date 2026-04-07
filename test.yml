@@ -1,0 +1,9 @@
+repos:
+  - url: https://github.com/bitwarden/server
+    name: bitwarden-server
+    build:
+      type: dotnet
+
+  - url: https://github.com/dani-garcia/vaultwarden
+    build:
+      type: rust

@@ -1,0 +1,149 @@
+name: starport — sync
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        type: choice
+        required: true
+        default: full
+        options:
+          - full      # all repos in repos.yml
+          - test      # use test.yml
+      force_full:
+        description: 'Force full clone — ignore SHA check'
+        type: boolean
+        required: false
+        default: false
+
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure Git
+        run: |
+          git config --global user.email "starport@noreply"
+          git config --global user.name "starport"
+          git config --global credential.helper ""
+          git config --global core.askPass ""
+
+      - name: Install PyYAML
+        run: pip install pyyaml -q --break-system-packages
+
+      # ── Fetch previous state for SHA comparison ───────────────
+      - name: Fetch previous state
+        env:
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+        run: |
+          STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+          if git clone "$STATE_REMOTE" /tmp/void-state 2>/dev/null; then
+            if [ -f /tmp/void-state/state.json ]; then
+              cp /tmp/void-state/state.json /tmp/prev-state.json
+              echo "✅ Previous state loaded"
+            else
+              echo "⚠️  No state.json — first run"
+            fi
+          else
+            echo "⚠️  Could not clone state repo — first run"
+          fi
+
+      # ── Prepare repos file ──────────────────────────────────
+      - name: Prepare repos file
+        env:
+          MODE:     ${{ github.event.inputs.mode || 'full' }}
+          IS_SCHED: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [ "$IS_SCHED" = "true" ] || [ "$MODE" = "full" ]; then
+            echo "📋 Full mode — using repos.yml"
+            echo "SYNC_REPOS=repos.yml" >> $GITHUB_ENV
+          else
+            echo "📋 Test mode — using test.yml"
+            echo "SYNC_REPOS=test.yml" >> $GITHUB_ENV
+          fi
+
+
+
+      # ── Run sync ─────────────────────────────────────────────
+      - name: Run sync
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          REPOS_FILE:       ${{ env.SYNC_REPOS }}
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          FORCE_FULL:       ${{ github.event.inputs.force_full == 'true' && 'true' || 'false' }}
+        run: |
+          chmod +x scripts/sync.sh
+          bash scripts/sync.sh || true
+
+      # ── Trigger build workflow if artifacts are needed ───────
+      - name: Trigger Build Workflow
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f /tmp/final-build-matrix.json ]; then
+            MATRIX=$(cat /tmp/final-build-matrix.json)
+            if [ "$MATRIX" != "[]" ]; then
+              echo "🚀 Triggering build with matrix..."
+              gh workflow run build.yml -f matrix_json="$MATRIX"
+            fi
+          fi
+
+      - name: Commit file changes
+        run: |
+          git add repos.yml lfs-repos.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "📋 No file changes"
+          else
+            git commit -m "sync: update repo lists"
+            git push
+          fi
+
+      # ── Generate README ───────────────────────────────────────
+      - name: Generate README
+        if: always()
+        env:
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
+          PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
+          PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
+          STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
+          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REPOS_FILE:       repos.yml
+          GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          README_ONLY:      "false"
+        run: |
+          git checkout repos.yml 2>/dev/null || true
+          chmod +x scripts/generate-readme.sh
+          bash scripts/generate-readme.sh
+
+      # ── Upload logs ───────────────────────────────────────────
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: sync-log-${{ github.run_id }}
+          path: |
+            /tmp/sync.log
+            /tmp/sync-verbose.log
+          retention-days: 30
+
+      - name: Print log
+        if: always()
+        run: cat /tmp/sync.log || true

@@ -1,0 +1,28 @@
+# =============================================================
+#  starport — repos.yml
+#  Structure:
+#  - url: GitHub source URL (required)
+#  - name: Preferred repository name (optional, defaults to source name)
+#  - branch: Branch to sync/build from (optional, defaults to repo default)
+#  - build:
+#      type: [flutter, android-gradle, electron, go, node]
+#      targets: [apk, exe, appImage, ios]
+#      runner: [ubuntu-latest, windows-latest, macos-latest] (optional)
+# =============================================================
+
+repos:
+  - url: https://github.com/authpass/authpass
+    name: authpass-mobile
+    branch: master
+    build:
+      type: flutter
+      targets: [apk, ios]
+      runner: macos-latest
+
+  - url: https://github.com/risin42/NagramX
+    name: nagramx
+    build:
+      type: java
+      targets: [apk]
+      runner: ubuntu-latest
+
