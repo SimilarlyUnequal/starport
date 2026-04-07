@@ -230,14 +230,29 @@ PYEOF
 ) || true
 }
 
+# ── Detect if PARENT_FOLDER is a user or an org ───────────────
+_is_org() {
+  local type
+  type=$(curl -s \
+    --header "Authorization: Bearer $REMOTE_TOKEN" \
+    --header "Accept: application/vnd.github+json" \
+    "https://api.github.com/users/${PARENT_FOLDER}" \
+    | python3 -c "
+import sys, json
+try:
+    print(json.load(sys.stdin).get('type','User'))
+except Exception:
+    print('User')
+" 2>/dev/null)
+  [ "$type" = "Organization" ]
+}
+
 # ── Ensure destination repo exists ────────────────────────────
 ensure_remote_repo() {
   local repo_name="$1"
-
-  # Check if repo exists on the destination GitHub account
-  # PARENT_FOLDER should be the GitHub Username/Org
   local full_name="${PARENT_FOLDER}/${repo_name}"
-  
+
+  # Check if repo already exists
   local status
   status=$(curl -s -o /dev/null -w "%{http_code}" \
     --header "Authorization: Bearer $REMOTE_TOKEN" \
@@ -249,20 +264,40 @@ ensure_remote_repo() {
     return 0
   fi
 
-  # Create repo on personal account
+  # Choose correct creation endpoint: org vs personal account
   log "   🆕 Creating repo: $full_name"
-  local response
+  local create_url
+  if _is_org; then
+    create_url="https://api.github.com/orgs/${PARENT_FOLDER}/repos"
+  else
+    create_url="https://api.github.com/user/repos"
+  fi
+
+  local response result
   response=$(curl -s -w "\n%{http_code}" \
     --request POST \
     --header "Authorization: Bearer $REMOTE_TOKEN" \
     --header "Content-Type: application/json" \
     --data "{\"name\":\"${repo_name}\",\"private\":true,\"auto_init\":false}" \
-    "https://api.github.com/user/repos")
+    "$create_url")
 
-  local result=$(echo "$response" | tail -1)
-  [ "$result" = "201" ] && RESOLVED_REPO_NAME="$full_name" && return 0
+  result=$(echo "$response" | tail -1)
+  if [ "$result" = "201" ]; then
+    RESOLVED_REPO_NAME="$full_name"
+    return 0
+  fi
 
-  log "   ❌ Failed to create repo (HTTP $result)"
+  local body
+  body=$(echo "$response" | head -n -1 | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('message', str(d))[:200])
+except Exception:
+    print(sys.stdin.read()[:200])
+" 2>/dev/null)
+  log "   ❌ Failed to create repo (HTTP $result): $body"
+  log "   💡 Ensure REMOTE_TOKEN has 'repo' scope (classic) or 'Administration: Read & Write' on all repos (fine-grained)"
   return 1
 }
 
