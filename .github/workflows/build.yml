@@ -25,6 +25,10 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     
+    env:
+      HAS_LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES != '' && 'true' || 'false' }}
+      HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' && 'true' || 'false' }}
+
     steps:
       - name: Checkout Source
         uses: actions/checkout@v6
@@ -89,7 +93,7 @@ jobs:
         run: echo "sdk.dir=${ANDROID_HOME}" >> local.properties
 
       - name: Inject local.properties secret
-        if: (matrix.build_type == 'android-gradle' || matrix.build_type == 'kotlin') && secrets.LOCAL_PROPERTIES != ''
+        if: (matrix.build_type == 'android-gradle' || matrix.build_type == 'kotlin') && env.HAS_LOCAL_PROPERTIES == 'true'
         env:
           LOCAL_PROPERTIES: ${{ secrets.LOCAL_PROPERTIES }}
         run: echo "$LOCAL_PROPERTIES" >> local.properties
@@ -107,7 +111,7 @@ jobs:
 
       # --- Decode keystore — runs for any build targeting APK ---
       - name: Setup signing keystore
-        if: contains(matrix.targets, 'apk') && secrets.KEYSTORE_BASE64 != ''
+        if: contains(matrix.targets, 'apk') && env.HAS_KEYSTORE == 'true'
         env:
           KEYSTORE_BASE64:    ${{ secrets.KEYSTORE_BASE64 }}
           KEY_ALIAS:          ${{ secrets.KEY_ALIAS }}
