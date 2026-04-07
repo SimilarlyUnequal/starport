@@ -34,11 +34,9 @@ jobs:
       - name: Generate README
         env:
           REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
-          REMOTE_URL:       ${{ secrets.REMOTE_URL }}
           PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
-          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
           REPOS_FILE:     repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           README_ONLY:      "true"

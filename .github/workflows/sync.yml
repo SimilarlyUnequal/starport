@@ -48,9 +48,9 @@ jobs:
       - name: Fetch previous state
         env:
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
-          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
+          REMOTE_TOKEN:     ${{ secrets.REMOTE_TOKEN }}
         run: |
-          STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+          STATE_REMOTE="https://x-access-token:${REMOTE_TOKEN}@${STATE_REPO_URL#https://}"
           if git clone "$STATE_REMOTE" /tmp/void-state 2>/dev/null; then
             if [ -f /tmp/void-state/state.json ]; then
               cp /tmp/void-state/state.json /tmp/prev-state.json
@@ -123,7 +123,6 @@ jobs:
           PARENT_FOLDER:    ${{ secrets.PARENT_FOLDER }}
           PROFILE_REPO:     ${{ secrets.PROFILE_REPO }}
           STATE_REPO_URL:   ${{ secrets.STATE_REPO_URL }}
-          STATE_REPO_TOKEN: ${{ secrets.STATE_REPO_TOKEN }}
           REPOS_FILE:       repos.yml
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
           GITHUB_WORKSPACE: ${{ github.workspace }}

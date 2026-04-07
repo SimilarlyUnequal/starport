@@ -19,7 +19,6 @@ export GIT_ASKPASS=/bin/false
 : "${PROFILE_REPO:?❌  PROFILE_REPO is not set}"
 : "${REPOS_FILE:?❌  REPOS_FILE is not set}"
 : "${STATE_REPO_URL:?❌  STATE_REPO_URL is not set}"
-: "${STATE_REPO_TOKEN:?❌  STATE_REPO_TOKEN is not set}"
 : "${GITHUB_TOKEN:?❌  GITHUB_TOKEN is not set}"
 : "${GITHUB_WORKSPACE:?❌  GITHUB_WORKSPACE is not set}"
 
@@ -43,7 +42,7 @@ export REPOS_FILE
 
 # Profile is a standard GitHub personal repo
 PROFILE_REMOTE="https://x-access-token:${REMOTE_TOKEN}@github.com/${PARENT_FOLDER}/${PROFILE_REPO}.git"
-STATE_REMOTE="https://${STATE_REPO_TOKEN}@${STATE_REPO_URL#https://}"
+STATE_REMOTE="https://x-access-token:${REMOTE_TOKEN}@${STATE_REPO_URL#https://}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 

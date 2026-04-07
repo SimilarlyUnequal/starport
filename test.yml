@@ -1,9 +1,7 @@
 repos:
-  - url: https://github.com/bitwarden/server
-    name: bitwarden-server
+  - url: https://github.com/risin42/NagramX
+    name: nagramx
     build:
-      type: dotnet
-
-  - url: https://github.com/dani-garcia/vaultwarden
-    build:
-      type: rust
+      type: java
+      targets: [apk]
+      runner: ubuntu-latest
