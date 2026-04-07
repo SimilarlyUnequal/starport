@@ -81,8 +81,19 @@ silent() {
   fi
 }
 
-# ── Clean up legacy GitLab logic ──────────────────────────────
-# (Note: ensure_namespace and transfer_project are no longer used)
+# ── Retry wrapper ────────────────────────────────────────────
+with_retry() {
+  local attempt=1
+  while [ $attempt -le $MAX_RETRIES ]; do
+    "$@" && return 0
+    if [ $attempt -lt $MAX_RETRIES ]; then
+      log "   ⚠️  Attempt $attempt failed — retrying in ${RETRY_DELAY}s..."
+      sleep $RETRY_DELAY
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
 
 github_api() {
   local endpoint="$1"
@@ -431,12 +442,12 @@ else: print(f'{s/1073741824:.2f} GB')
   rm -rf "$work_dir"
 
   if [ "$push_ok" = false ]; then
-    log "❌ $display_name — push failed"
-    add_result "$source_url" "$subgroup" "failed" \
+    log "❌ $repo_name — push failed"
+    add_result "$source_url" "" "failed" \
       "$clone_time" "$push_time" "$total_time" \
       "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
     FAILED=$((FAILED + 1))
-    FAILED_REPOS+=("$display_name")
+    FAILED_REPOS+=("$repo_name")
     return 1
   fi
 
@@ -469,8 +480,8 @@ PYEOF
     echo "," >> /tmp/build-matrix-items.json
   fi
 
-  log "✅ $display_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
-  add_result "$source_url" "$subgroup" "success" \
+  log "✅ $repo_name (clone: ${clone_time}s push: ${push_time}s total: ${total_time}s size: $repo_size)"
+  add_result "$source_url" "" "success" \
     "$clone_time" "$push_time" "$total_time" \
     "$repo_size" "$branch_count" "$tag_count" "$retries" "$current_sha"
   SUCCESS=$((SUCCESS + 1))
