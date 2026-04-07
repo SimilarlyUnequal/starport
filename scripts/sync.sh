@@ -227,6 +227,9 @@ if status != "skipped":
 data[url] = entry
 print(json.dumps(data))
 PYEOF
+) || true
+}
+
 # ── Ensure destination repo exists ────────────────────────────
 ensure_remote_repo() {
   local repo_name="$1"
